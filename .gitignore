@@ -1,0 +1,15 @@
+node_modules/
+dist/
+__pycache__/
+.venv/
+venv/
+
+# Where this deploys to. Public repo; the addresses are not.
+deploy_local.py
+
+# Backup left by tools/scrub_workbook.py
+*.xlsx.bak
+
+.DS_Store
+*.log
+.~lock.*#

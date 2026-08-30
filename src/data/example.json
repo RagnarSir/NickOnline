@@ -1,0 +1,116 @@
+{
+ "ratingsMode": "Percent",
+ "specialtiesMode": "Yes",
+ "extraTime": "Y",
+ "manmarking": 1.0,
+ "teamA": {
+  "possession": 0.8,
+  "percentConv": [
+   0.2,
+   0.2,
+   0.2
+  ],
+  "att": [
+   11.75,
+   13.5,
+   15.5
+  ],
+  "mid": 11.5,
+  "def": [
+   13.25,
+   16.75,
+   16.75
+  ],
+  "ispDef": 12.5,
+  "ispAtt": 9.25,
+  "gkStars": 10.5,
+  "tacticLevel": null,
+  "tactic": "(no tactic)",
+  "specialties": {
+   "fw": [
+    null,
+    "PNF",
+    null,
+    "Q",
+    null
+   ],
+   "mid": [
+    "H",
+    "PDIM",
+    "T",
+    "Q",
+    "Q"
+   ],
+   "def": [
+    "T",
+    null,
+    "Z",
+    null,
+    "Z"
+   ],
+   "gk": [
+    null,
+    null,
+    "Z",
+    null,
+    null
+   ]
+  },
+  "location": "Neutral"
+ },
+ "teamB": {
+  "possession": 0.19999999999999996,
+  "percentConv": [
+   0.01,
+   0.01,
+   0.01
+  ],
+  "att": [
+   13.25,
+   14.5,
+   10.75
+  ],
+  "mid": 13.75,
+  "def": [
+   14.0,
+   18.0,
+   12.5
+  ],
+  "ispDef": 12.0,
+  "ispAtt": 8.5,
+  "gkStars": 10.0,
+  "tacticLevel": 26.0,
+  "tactic": "Play Creatively",
+  "specialties": {
+   "fw": [
+    null,
+    "PNF",
+    null,
+    "Q",
+    null
+   ],
+   "mid": [
+    "Q",
+    "U",
+    "U",
+    "U",
+    "Q"
+   ],
+   "def": [
+    "U",
+    null,
+    "U",
+    "Q",
+    null
+   ],
+   "gk": [
+    null,
+    null,
+    "Z",
+    null,
+    null
+   ]
+  },
+  "location": "Neutral"
+ }
+}
