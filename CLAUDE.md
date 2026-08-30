@@ -206,6 +206,34 @@ These bit during the port and will bite again:
 - HTSN (home/away, extra time, man-marking) is **display only** — nothing downstream reads it,
   so location does not move the odds.
 
+## GitHub
+
+Public at **https://github.com/RagnarSir/NickOnline**.
+
+Two things keep it current, and neither pushes behind your back:
+
+- **`deploy.py` commits and pushes as its last step**, so what is published always matches what
+  is live. `--no-push` skips it. It never fails the deploy over a git problem.
+- **A `Stop` hook (`tools/git_reminder.py`)** reports uncommitted or unpushed work at the end
+  of a session. Advisory only.
+
+Kept out of the repo on purpose (`.gitignore`):
+
+| Path | Why |
+|---|---|
+| `deploy_local.py` | The server, user and SSH key names. Public repo; addresses are not. |
+| `*.xlsx.bak` | Backup from `tools/scrub_workbook.py`, which holds the un-scrubbed metadata. |
+
+`tools/scrub_workbook.py` strips the author name and the last-saved absolute path from the
+workbook's file metadata — it is committed, so its metadata is published too. Run
+`python3 tools/scrub_workbook.py --check` if a fresh copy of the workbook is ever dropped in;
+it exits non-zero when there is something to remove. Scrubbing touches metadata only, and the
+proof is that `npm run tables` reproduces byte-identical output and the parity suite still
+passes.
+
+Hook commands use **relative paths** (`python3 tools/git_reminder.py`) so a clone works without
+editing, and so no home directory ends up in a public file. They run from the project root.
+
 ## Deployment
 
 ```bash

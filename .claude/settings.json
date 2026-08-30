@@ -7,9 +7,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"/home/ragnar/Claude/NickOnline/tools/guide_hook.py\" 2>/dev/null || true",
+            "command": "python3 tools/guide_hook.py 2>/dev/null || true",
             "timeout": 15,
             "statusMessage": "Checking the How-to is current"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 tools/git_reminder.py 2>/dev/null || true",
+            "timeout": 15
           }
         ]
       }
