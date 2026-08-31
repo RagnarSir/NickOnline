@@ -10,6 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:py": "server/venv/bin/python -m pytest -q server/tests",
+    "test:all": "npm run test:py && npm test",
+    "dev:api": "NICKONLINE_COOKIE_SECURE=0 server/venv/bin/python server/devserver.py",
     "tables": "python3 tools/extract_tables.py",
     "howto": "python3 tools/build_howto.py",
     "howto:check": "python3 tools/build_howto.py --check"

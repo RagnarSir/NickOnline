@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """NickOnline deploy — one idempotent command.
 
-    python3 deploy.py             # test, build, rsync, (nginx), verify, push
-    python3 deploy.py --no-build  # ship the existing dist/ as-is
+    python3 deploy.py             # test, build, rsync, venv, systemd, nginx, verify, push
+    python3 deploy.py --no-build  # ship the existing dist/ as-is (still runs the tests)
+    python3 deploy.py --no-test   # skip the suites — say so deliberately
     python3 deploy.py --no-push   # skip the git commit and push
+    python3 deploy.py --logs      # tail the API service log and exit
 
-Each step is safe to re-run. The app is a static bundle with no backend, so
-there is no port to claim, no systemd unit and no .env on the VPS — nginx serves
-dist/ directly with an alias in a shared catch-all vhost, reusing its TLS cert.
+Each step is safe to re-run. Two things ship: the static bundle, which nginx
+serves from dist/ with an alias, and the accounts API, which runs as a systemd
+service on 127.0.0.1:API_PORT with nginx proxying BASE_PATH/api/ to it. Both go
+into a shared catch-all vhost, reusing its TLS cert.
+
+The SQLite database and the session secret live in PROJECT_DIR/data, a *sibling*
+of the two rsync targets rather than a child of either — so `rsync --delete` is
+structurally incapable of reaching them, with no --filter rule to remember.
 
 Which server, and where in its nginx config, lives in `deploy_local.py`, which is
 untracked — this file is public, and the addresses are not. Copy
@@ -21,8 +28,14 @@ import time
 from pathlib import Path
 
 BASE_PATH = "/NickOnline"      # served at https://DOMAIN/NickOnline/
+# Next free port in the fleet registry (~/.claude/skills/deploy-vps/conventions.md).
+# Not a secret — it is a loopback port and the registry is shared — so it stays
+# here rather than in deploy_local.py, which vite.config.ts could not import.
+API_PORT = 8008
+SERVICE = "nickonline-api"
 REPO = Path(__file__).resolve().parent
 DIST = REPO / "dist"
+SERVER = REPO / "server"
 
 try:
     from deploy_local import HOST, USER, PROJECT_DIR, DOMAIN, NGINX_ANCHOR, SSH_KEYS
@@ -35,6 +48,9 @@ except ImportError:
     raise SystemExit(1)
 
 APP_URL = f"https://{DOMAIN}{BASE_PATH}/"
+API_URL = f"{APP_URL}api"
+REMOTE_SERVER = f"{PROJECT_DIR}/server"
+REMOTE_DATA = f"{PROJECT_DIR}/data"
 
 
 def log(m: str) -> None:
@@ -77,18 +93,32 @@ def ssh(cmd: str, *, check: bool = True, capture: bool = False) -> subprocess.Co
     return r
 
 
-def build() -> None:
-    """Parity with the workbook is the whole product, so never ship a red suite."""
+def test() -> None:
+    """Two things must never regress: parity with the workbook, which is the whole
+    product, and isolation between groups, which is the whole point of accounts.
+
+    This runs even with --no-build. Shipping an untested bundle is a decision, so
+    skipping it takes --no-test rather than falling out of another flag.
+    """
+    venv_py = SERVER / "venv" / "bin" / "python"
+    py = str(venv_py) if venv_py.exists() else sys.executable
+    log("Running the API test suite (auth, groups, isolation)")
+    if subprocess.run([py, "-m", "pytest", "-q", "server/tests"], cwd=REPO).returncode != 0:
+        fail("API tests failed — refusing to deploy.")
     log("Running the parity test suite")
     if subprocess.run(["npm", "test"], cwd=REPO).returncode != 0:
         fail("Tests failed — refusing to deploy.")
+
+
+def build() -> None:
     log("Building")
     if subprocess.run(["npm", "run", "build"], cwd=REPO).returncode != 0:
         fail("Build failed")
 
 
 def ensure_dirs() -> None:
-    ssh(f"mkdir -p {PROJECT_DIR}/dist")
+    # data/ is a sibling of dist/ and server/, never inside either.
+    ssh(f"mkdir -p {PROJECT_DIR}/dist {REMOTE_SERVER} {REMOTE_DATA} && chmod 700 {REMOTE_DATA}")
 
 
 def rsync_dist() -> None:
@@ -103,8 +133,116 @@ def rsync_dist() -> None:
     ]
     if subprocess.run(cmd).returncode != 0:
         fail("rsync failed")
-    # nginx runs as www-data and needs to traverse into the home directory.
-    ssh(f"chmod o+x /home/{USER} && chmod -R o+rX {PROJECT_DIR}")
+    # nginx runs as www-data and needs to traverse into the home directory. Only
+    # dist/ is made world-readable: a recursive chmod over PROJECT_DIR would
+    # publish data/ — the SQLite database, every password hash, and the session
+    # secret — to every other app and user on this shared box.
+    ssh(f"chmod o+x /home/{USER} && chmod o+x {PROJECT_DIR} && chmod -R o+rX {PROJECT_DIR}/dist")
+
+
+def rsync_server() -> None:
+    """--delete is safe here: data/ is a sibling of server/, not a child."""
+    log("Syncing server/ to VPS")
+    cmd = [
+        "rsync", "-az", "--delete",
+        "-e", " ".join(SSH),
+        "--exclude", "venv", "--exclude", "__pycache__", "--exclude", "*.pyc",
+        "--exclude", ".devdata", "--exclude", "tests",
+        f"{SERVER}/",
+        f"{USER}@{HOST}:{REMOTE_SERVER}/",
+    ]
+    if subprocess.run(cmd).returncode != 0:
+        fail("rsync of server/ failed")
+
+
+def venv_and_deps() -> None:
+    log("Installing API dependencies")
+    ssh(f"test -d {REMOTE_SERVER}/venv || python3 -m venv {REMOTE_SERVER}/venv")
+    ssh(f"{REMOTE_SERVER}/venv/bin/pip install --quiet --upgrade pip")
+    ssh(f"{REMOTE_SERVER}/venv/bin/pip install --quiet -r {REMOTE_SERVER}/requirements.txt")
+
+
+def init_db() -> None:
+    """Create the schema before the service starts, so two gunicorn workers never
+    race each other on CREATE TABLE."""
+    log("Preparing the database")
+    ssh(
+        f"cd {REMOTE_SERVER} && NICKONLINE_DATA_DIR={REMOTE_DATA} "
+        f"{REMOTE_SERVER}/venv/bin/python -m cli initdb"
+    )
+
+
+def admin_hint() -> None:
+    """Never auto-promote. Sign-up is open, so a self-disabling "first user becomes
+    admin" page would hand the instance to whoever found the URL first."""
+    out = ssh(
+        f"cd {REMOTE_SERVER} && NICKONLINE_DATA_DIR={REMOTE_DATA} "
+        f"{REMOTE_SERVER}/venv/bin/python -m cli users",
+        capture=True, check=False,
+    ).stdout
+    if " admin " in out:
+        return
+    warn(
+        "No admin account yet. Sign up in the app, then run:\n"
+        f'   ssh {USER}@{HOST} "cd {REMOTE_SERVER} && NICKONLINE_DATA_DIR={REMOTE_DATA} \\\n'
+        f'      {REMOTE_SERVER}/venv/bin/python -m cli promote <username>"'
+    )
+
+
+SYSTEMD_UNIT = f"""[Unit]
+Description=NickOnline accounts API
+After=network.target
+
+[Service]
+Type=simple
+User={USER}
+Group={USER}
+WorkingDirectory={REMOTE_SERVER}
+Environment=PYTHONUNBUFFERED=1
+Environment=NICKONLINE_DATA_DIR={REMOTE_DATA}
+Environment=NICKONLINE_BASE_PATH={BASE_PATH}
+Environment=NICKONLINE_COOKIE_SECURE=1
+ExecStart={REMOTE_SERVER}/venv/bin/gunicorn \\
+    --bind 127.0.0.1:{API_PORT} \\
+    --workers 2 --threads 4 --timeout 30 --graceful-timeout 10 \\
+    --access-logfile - --error-logfile - \\
+    wsgi:app
+Restart=always
+RestartSec=3
+
+# The only writable path is the data directory. A compromised API process must
+# not be able to touch dist/, which nginx serves to everyone.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths={REMOTE_DATA}
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def install_systemd() -> None:
+    log(f"Installing and restarting {SERVICE}")
+    ssh(f"cat > /tmp/{SERVICE}.service <<'UNITEOF'\n{SYSTEMD_UNIT}UNITEOF")
+    ssh(
+        f"sudo cp /tmp/{SERVICE}.service /etc/systemd/system/{SERVICE}.service "
+        f"&& rm /tmp/{SERVICE}.service && sudo systemctl daemon-reload "
+        f"&& sudo systemctl enable --now {SERVICE} && sudo systemctl restart {SERVICE}"
+    )
+    time.sleep(2)
+    state = ssh(f"systemctl is-active {SERVICE}", capture=True, check=False).stdout.strip()
+    if state != "active":
+        print(ssh(f"journalctl -u {SERVICE} -n 30 --no-pager", capture=True, check=False).stdout)
+        fail(f"{SERVICE} is {state or 'not running'} — see the log above.")
+
+
+def logs() -> None:
+    print(ssh(f"journalctl -u {SERVICE} -n 80 --no-pager", capture=True, check=False).stdout)
 
 
 # Content-hashed assets are immutable; index.html must never be cached or the
@@ -125,6 +263,22 @@ NGINX_BLOCK = f"""    location {BASE_PATH}/assets/ {{
 """
 
 
+NGINX_API_BLOCK = f"""    location {BASE_PATH}/api/ {{
+        proxy_pass http://127.0.0.1:{API_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        # Appends the peer nginx actually saw. The API trusts the RIGHTMOST entry,
+        # which is the one hop a client cannot forge.
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 30s;
+        client_max_body_size 1m;
+    }}
+
+"""
+
+
 def find_nginx_site() -> str:
     """The enabled vhost carrying NGINX_ANCHOR — i.e. the shared catch-all."""
     out = ssh(
@@ -137,15 +291,27 @@ def find_nginx_site() -> str:
 
 
 def ensure_nginx() -> None:
+    """Each location gets its OWN guard.
+
+    A single guard on `location /NickOnline/ {` was already satisfied by the
+    static block on any box deployed before the API existed — so the API block
+    would never be inserted, and the deploy would report success while every API
+    call 404'd. Order between them does not matter: nginx matches the longest
+    prefix, so /NickOnline/api/ always beats /NickOnline/.
+    """
     site = find_nginx_site()
-    marker = f"location {BASE_PATH}/ {{"
+    ensure_block(site, f"location {BASE_PATH}/ {{", NGINX_BLOCK, "static")
+    ensure_block(site, f"location {BASE_PATH}/api/ {{", NGINX_API_BLOCK, "API")
+
+
+def ensure_block(site: str, marker: str, block: str, what: str) -> None:
     has = ssh(
         f"grep -qF '{marker}' {site} && echo yes || echo no", capture=True
     ).stdout.strip()
     if has == "yes":
-        log(f"nginx {BASE_PATH} block already present in {site}")
+        log(f"nginx {what} block already present in {site}")
         return
-    log(f"Adding nginx {BASE_PATH} location to {site}")
+    log(f"Adding nginx {what} location to {site}")
     # The catch-all vhost has two server blocks (:80 and :443), each carrying
     # the anchor line. Insert before EVERY exact anchor match (one per block) so
     # HTTPS is covered too. The anchor carries its trailing brace so it never
@@ -161,7 +327,7 @@ if {marker!r} in src:
 bak = "{PROJECT_DIR}.nginx.bak-" + time.strftime("%Y%m%d%H%M%S")
 shutil.copy(path, bak)
 print("BAK=" + bak)
-block = {NGINX_BLOCK!r}
+block = {block!r}
 anchor = {NGINX_ANCHOR!r}
 out, i = [], 0
 while True:
@@ -182,21 +348,51 @@ if sudo nginx -t; then sudo systemctl reload nginx; else echo 'invalid config �
     ssh(remote)
 
 
+def curl(url: str, *, insecure: bool = False) -> str:
+    flags = "-sk" if insecure else "-s"
+    return ssh(
+        f"curl {flags} -o /dev/null -w '%{{http_code}}' {url}", capture=True, check=False
+    ).stdout.strip()
+
+
+def verify_api() -> None:
+    """Prove the API is both reachable and guarded.
+
+    An unauthenticated 200 from /library would mean the login gate is not in the
+    request path at all — every group's saved work readable by anyone who knows
+    the URL. That is the one outcome worth failing a finished deploy over.
+    """
+    log(f"Verifying {API_URL}/")
+    health = curl(f"{API_URL}/health")
+    if not health.startswith("2"):
+        warn(f"API health check returned {health or 'no response'} — check: python3 deploy.py --logs")
+        return
+    log(f"API healthy ({health})")
+
+    guard = curl(f"{API_URL}/library")
+    if guard == "401":
+        log("Login gate confirmed (401 on /library without a session)")
+    elif guard.startswith("2"):
+        fail(
+            f"/library returned {guard} WITHOUT a session — the login gate is not "
+            "protecting the library. Every group's saved work is exposed. "
+            f"Stop the service now: ssh {USER}@{HOST} 'sudo systemctl stop {SERVICE}'"
+        )
+    else:
+        warn(f"/library returned {guard}, expected 401 — check: python3 deploy.py --logs")
+
+
 def verify() -> None:
     """Never fails the deploy — a bad response is a warning to go and look."""
     log(f"Verifying {APP_URL}")
-    code = ssh(
-        f"curl -s -o /dev/null -w '%{{http_code}}' {APP_URL}", capture=True, check=False
-    ).stdout.strip()
+    code = curl(APP_URL)
     if code.startswith(("2", "3")):
         log(f"OK ({code})")
         return
 
     # Distinguish "the app is broken" from "this host's TLS cert is expired",
     # which is a shared-vhost problem affecting every app on the box.
-    insecure = ssh(
-        f"curl -sk -o /dev/null -w '%{{http_code}}' {APP_URL}", capture=True, check=False
-    ).stdout.strip()
+    insecure = curl(APP_URL, insecure=True)
     if insecure.startswith(("2", "3")):
         warn(
             f"App responds {insecure} but the TLS certificate is not valid "
@@ -227,12 +423,23 @@ def git_push() -> None:
 
 
 def main() -> None:
+    if "--logs" in sys.argv:
+        logs()
+        return
+    if "--no-test" not in sys.argv:
+        test()
     if "--no-build" not in sys.argv:
         build()
     ensure_dirs()
     rsync_dist()
+    rsync_server()
+    venv_and_deps()
+    init_db()
+    install_systemd()
     ensure_nginx()
     verify()
+    verify_api()
+    admin_hint()
     if "--no-push" not in sys.argv:
         git_push()
     log(f"Done — {APP_URL}")

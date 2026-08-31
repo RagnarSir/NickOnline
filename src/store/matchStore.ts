@@ -1,12 +1,23 @@
-/** Application state: the match input, the correction flags, sharing and saved matchups. */
+/**
+ * Application state: the match input, the correction flags, sharing and the
+ * saved library.
+ *
+ * The calculator half is entirely local and synchronous — `input`,
+ * `corrections` and everything that edits them never touches the network, so an
+ * anonymous visitor gets the whole model with no account.
+ *
+ * The library half (`saved`, `lineups`) belongs to a *group* on the server. It
+ * starts empty and is filled by `loadLibrary()` after sign-in. It used to
+ * hydrate from localStorage at module scope, which cannot work now: the request
+ * has to wait for a session, and the answer depends on which group you are in.
+ */
 
 import { create } from 'zustand'
+import { api, ApiError } from '../api/client'
 import example from '../data/example.json'
+import { markImported, readLegacy } from '../migrate/localLibrary'
 import type { Corrections, MatchInput, SpecialtyGrid, TeamInput, Line, Specialty, Tactic, Location } from '../engine/types'
 import { NO_CORRECTIONS } from '../engine/types'
-
-const SAVED_KEY = 'nickonline-saved-v1'
-const LINEUP_KEY = 'nickonline-lineups-v1'
 
 const line = (cells: (string | null)[]): Line => cells.map((c) => (c ?? '') as Specialty) as unknown as Line
 
@@ -80,8 +91,12 @@ export const defaultInput = (): MatchInput => ({
 })
 
 export interface SavedMatchup {
+  /** Server id. Names identify a matchup to people; this identifies it to the API. */
+  id: string
   name: string
   savedAt: number
+  /** Who saved it last — a byline on a shared shelf, not a permission. */
+  savedBy: string
   input: MatchInput
   corrections: Corrections
 }
@@ -95,8 +110,21 @@ export interface SavedLineup {
   name: string
   side: 'A' | 'B'
   savedAt: number
+  savedBy: string
   team: TeamInput
 }
+
+/** What a write returned: saved, or refused because the name is already taken. */
+export type SaveResult = 'ok' | 'conflict' | 'error'
+
+/** Who holds the name a save collided with, so the user can decide knowingly. */
+export interface Conflict {
+  name: string
+  savedBy: string
+  savedAt: number
+}
+
+export type LibraryStatus = 'idle' | 'loading' | 'ready' | 'error'
 
 interface State {
   input: MatchInput
@@ -106,46 +134,52 @@ interface State {
   compareWith: string | null
   /** Fields an import could not supply, highlighted until the user fills them. */
   needsAttention: string[]
+  library: LibraryStatus
+  libraryError: string | null
+  /** Set when the last save hit a name someone else already used. */
+  conflict: Conflict | null
+
+  // Local and synchronous: the calculator works with no account and no network.
   setInput: (fn: (draft: MatchInput) => void) => void
   replaceInput: (input: MatchInput, corrections?: Corrections) => void
   setCorrection: (key: keyof Corrections, value: boolean) => void
-  save: (name: string) => void
-  remove: (name: string) => void
   setCompareWith: (name: string | null) => void
   applyImport: (found: Partial<TeamInput>, attention: string[]) => void
   clearAttention: (field: string) => void
-  saveLineup: (side: 'A' | 'B', name: string) => void
-  removeLineup: (id: string) => void
   applyLineup: (lineup: SavedLineup) => void
   applyPairing: (a: SavedLineup, b: SavedLineup) => void
+
+  // The group's shared library, on the server.
+  loadLibrary: () => Promise<void>
+  clearLibrary: () => void
+  save: (name: string, overwrite?: boolean) => Promise<SaveResult>
+  remove: (name: string) => Promise<void>
+  saveLineup: (side: 'A' | 'B', name: string, overwrite?: boolean) => Promise<SaveResult>
+  removeLineup: (id: string) => Promise<void>
+  clearConflict: () => void
+  importLocal: () => Promise<{ added: number; skipped: string[] }>
+  importPersonal: () => Promise<{ added: number; skipped: string[] }>
 }
 
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T
 
-function read<T>(key: string): T[] {
-  try {
-    const raw = localStorage.getItem(key)
-    return raw ? (JSON.parse(raw) as T[]) : []
-  } catch {
-    return []
-  }
-}
+const byNewest = (a: { savedAt: number }, b: { savedAt: number }) => b.savedAt - a.savedAt
 
-function write<T>(key: string, value: T[]) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value))
-  } catch {
-    /* private browsing, quota, blocked storage — the app still works */
-  }
+/** Replace the row with the same id, or add it, then re-sort. */
+function splice<T extends { id: string; savedAt: number }>(rows: T[], row: T): T[] {
+  return [...rows.filter((r) => r.id !== row.id), row].sort(byNewest)
 }
 
 export const useStore = create<State>((set, get) => ({
   input: defaultInput(),
   corrections: { ...NO_CORRECTIONS },
-  saved: read<SavedMatchup>(SAVED_KEY),
-  lineups: read<SavedLineup>(LINEUP_KEY),
+  saved: [],
+  lineups: [],
   compareWith: null,
   needsAttention: [],
+  library: 'idle',
+  libraryError: null,
+  conflict: null,
 
   setInput: (fn) =>
     set((s) => {
@@ -177,38 +211,117 @@ export const useStore = create<State>((set, get) => ({
   clearAttention: (field) =>
     set((s) => ({ needsAttention: s.needsAttention.filter((f) => f !== field) })),
 
-  save: (name) => {
-    const { input, corrections, saved } = get()
-    const next = [
-      ...saved.filter((m) => m.name !== name),
-      { name, savedAt: Date.now(), input: clone(input), corrections: { ...corrections } },
-    ].sort((a, b) => b.savedAt - a.savedAt)
-    write(SAVED_KEY, next)
-    set({ saved: next })
-  },
-
-  remove: (name) => {
-    const next = get().saved.filter((m) => m.name !== name)
-    write(SAVED_KEY, next)
-    set({ saved: next, compareWith: get().compareWith === name ? null : get().compareWith })
-  },
-
   setCompareWith: (name) => set({ compareWith: name }),
 
-  saveLineup: (side, name) => {
-    const team = side === 'A' ? get().input.teamA : get().input.teamB
-    const next = [
-      ...get().lineups.filter((l) => !(l.side === side && l.name === name)),
-      { id: `${side}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, side, savedAt: Date.now(), team: clone(team) },
-    ]
-    write(LINEUP_KEY, next)
-    set({ lineups: next })
+  /**
+   * One round-trip for the whole shelf. The scenario table simulates every
+   * matchup and the matrix simulates every pairing, so the client needs the
+   * full payloads rather than a summary it would have to fetch row by row.
+   */
+  loadLibrary: async () => {
+    set({ library: 'loading', libraryError: null })
+    try {
+      const data = await api<{ matchups: SavedMatchup[]; lineups: SavedLineup[] }>('/library')
+      set({
+        saved: [...data.matchups].sort(byNewest),
+        lineups: [...data.lineups].sort(byNewest),
+        library: 'ready',
+      })
+    } catch (e) {
+      const message = e instanceof ApiError ? e.message : 'Could not load your library.'
+      // A 401 is not an error worth shouting about: the session simply ended,
+      // and App.tsx has already been told to fall back to the signed-out view.
+      if (e instanceof ApiError && e.status === 401) set({ library: 'idle' })
+      else set({ library: 'error', libraryError: message })
+    }
   },
 
-  removeLineup: (id) => {
-    const next = get().lineups.filter((l) => l.id !== id)
-    write(LINEUP_KEY, next)
-    set({ lineups: next })
+  clearLibrary: () =>
+    set({ saved: [], lineups: [], library: 'idle', libraryError: null, compareWith: null }),
+
+  clearConflict: () => set({ conflict: null }),
+
+  save: async (name, overwrite = false) => {
+    const { input, corrections } = get()
+    try {
+      const row = await api<SavedMatchup>('/matchups', {
+        method: 'PUT',
+        body: { name, input, corrections, overwrite },
+      })
+      set((s) => ({ saved: splice(s.saved, row), conflict: null }))
+      return 'ok'
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        set({ conflict: e.detail as Conflict })
+        return 'conflict'
+      }
+      set({ libraryError: e instanceof ApiError ? e.message : 'Could not save.' })
+      return 'error'
+    }
+  },
+
+  remove: async (name) => {
+    // The table and its callers speak in names; the API speaks in ids.
+    const row = get().saved.find((m) => m.name === name)
+    if (!row) return
+    try {
+      await api(`/matchups/${row.id}`, { method: 'DELETE' })
+      set((s) => ({
+        saved: s.saved.filter((m) => m.id !== row.id),
+        compareWith: s.compareWith === name ? null : s.compareWith,
+      }))
+    } catch (e) {
+      set({ libraryError: e instanceof ApiError ? e.message : 'Could not delete.' })
+    }
+  },
+
+  saveLineup: async (side, name, overwrite = false) => {
+    const team = side === 'A' ? get().input.teamA : get().input.teamB
+    try {
+      const row = await api<SavedLineup>('/lineups', {
+        method: 'POST',
+        body: { side, name, team, overwrite },
+      })
+      set((s) => ({ lineups: splice(s.lineups, row), conflict: null }))
+      return 'ok'
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        set({ conflict: e.detail as Conflict })
+        return 'conflict'
+      }
+      set({ libraryError: e instanceof ApiError ? e.message : 'Could not save.' })
+      return 'error'
+    }
+  },
+
+  removeLineup: async (id) => {
+    try {
+      await api(`/lineups/${id}`, { method: 'DELETE' })
+      set((s) => ({ lineups: s.lineups.filter((l) => l.id !== id) }))
+    } catch (e) {
+      set({ libraryError: e instanceof ApiError ? e.message : 'Could not delete.' })
+    }
+  },
+
+  /** Upload what this browser saved before accounts existed. User-initiated. */
+  importLocal: async () => {
+    const legacy = readLegacy()
+    const result = await api<{ added: number; skipped: string[] }>('/import/local', {
+      method: 'POST',
+      body: legacy,
+    })
+    markImported()
+    await get().loadLibrary()
+    return result
+  },
+
+  /** Copy the personal shelf into the shared group. Copies, never moves. */
+  importPersonal: async () => {
+    const result = await api<{ added: number; skipped: string[] }>('/personal/import', {
+      method: 'POST',
+    })
+    await get().loadLibrary()
+    return result
   },
 
   applyLineup: (lineup) =>

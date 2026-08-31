@@ -20,3 +20,9 @@ NGINX_ANCHOR = "location /SomeOtherApp/ {"
 
 # Key files to look for in ~/.ssh, first match wins.
 SSH_KEYS = ("nickonline_vps",)
+
+# Note: the deploy needs passwordless sudo on the box for `nginx -t`,
+# `systemctl reload nginx` and `systemctl restart nickonline-api`. The accounts
+# API runs as a systemd service on 127.0.0.1:8008 (see API_PORT in deploy.py);
+# its database and session secret live in PROJECT_DIR/data, which the deploy
+# creates mode 700 and never rsyncs over.

@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
+import { AccountButton } from './components/Account/AccountButton'
+import { AccountPanel } from './components/Account/AccountPanel'
+import { SignInPrompt } from './components/Account/SignInPrompt'
 import { CorrectionsPanel } from './components/Corrections/CorrectionsPanel'
 import { HelpPanel } from './components/Help/HelpPanel'
 import { ImportPanel } from './components/Import/ImportPanel'
@@ -13,7 +16,9 @@ import { TeamPanel } from './components/TeamPanel/TeamPanel'
 import { ThemeToggle } from './components/ThemeToggle/ThemeToggle'
 import { simulate } from './engine/simulate'
 import type { MatchInput } from './engine/types'
+import { setUnauthorizedHandler } from './api/client'
 import { decodeState, shareUrl } from './share'
+import { useAuth } from './store/authStore'
 import { defaultInput, exampleInput, useStore } from './store/matchStore'
 
 export default function App() {
@@ -21,9 +26,13 @@ export default function App() {
   const { setInput, replaceInput, setCorrection, save, remove, setCompareWith } = useStore()
   const { saveLineup, removeLineup, applyLineup, applyPairing } = useStore()
   const { applyImport, clearAttention } = useStore()
+  const { loadLibrary, clearLibrary, clearConflict } = useStore()
+  const { status, me, bootstrap, markAnon } = useAuth()
   const [toast, setToast] = useState<string | null>(null)
   const [showHelp, setShowHelp] = useState(() => window.location.hash === '#help')
   const [showImport, setShowImport] = useState(false)
+  const [showAccount, setShowAccount] = useState(false)
+  const signedIn = status === 'user'
 
   // A shared link fully describes a matchup; load it once on mount.
   useEffect(() => {
@@ -39,6 +48,28 @@ export default function App() {
     const id = setTimeout(() => setToast(null), 2600)
     return () => clearTimeout(id)
   }, [toast])
+
+  // Who am I? Answered once, before the library is asked for.
+  useEffect(() => {
+    void bootstrap()
+  }, [bootstrap])
+
+  // A session that ends server-side must not leave another group's rows on
+  // screen, so drop the shelf as well as the identity.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      markAnon()
+      clearLibrary()
+      setToast('Signed out — sign in again to reach your library')
+    })
+  }, [markAnon, clearLibrary])
+
+  // Keyed on the group as well as the status: an admin can move someone between
+  // groups mid-session, and the shelf has to follow without a re-login.
+  useEffect(() => {
+    if (signedIn) void loadLibrary()
+    else clearLibrary()
+  }, [signedIn, me?.group.id, loadLibrary, clearLibrary])
 
   const result = useMemo(() => simulate(input, corrections), [input, corrections])
 
@@ -60,13 +91,45 @@ export default function App() {
     }
   }
 
-  const onSave = () => {
+  const onSave = async () => {
+    if (!signedIn) {
+      setShowAccount(true)
+      setToast('Sign in to save a matchup')
+      return
+    }
     const suggested = `${input.teamA.name} v ${input.teamB.name}`
     const name = window.prompt('Name this matchup', suggested)?.trim()
-    if (name) {
-      save(name)
-      setToast(`Saved “${name}”`)
+    if (!name) return
+
+    let outcome = await save(name)
+    if (outcome === 'conflict') {
+      // On a shared shelf that name may be a colleague's work, so replacing it
+      // is a decision rather than a side effect.
+      const held = useStore.getState().conflict
+      const when = held ? new Date(held.savedAt).toLocaleString() : ''
+      clearConflict()
+      const ok = window.confirm(
+        `“${name}” was saved by ${held?.savedBy ?? 'someone'} on ${when}.\n\nReplace it?`,
+      )
+      if (!ok) return
+      outcome = await save(name, true)
     }
+    setToast(outcome === 'ok' ? `Saved “${name}”` : useStore.getState().libraryError ?? 'Could not save')
+  }
+
+  const onSaveLineup = async (side: 'A' | 'B') => {
+    const team = side === 'A' ? input.teamA : input.teamB
+    const name = window.prompt(`Name this ${team.name} setup`, describeLineup(team))?.trim()
+    if (!name) return
+
+    let outcome = await saveLineup(side, name)
+    if (outcome === 'conflict') {
+      const held = useStore.getState().conflict
+      clearConflict()
+      if (!window.confirm(`“${name}” was saved by ${held?.savedBy ?? 'someone'}.\n\nReplace it?`)) return
+      outcome = await saveLineup(side, name, true)
+    }
+    setToast(outcome === 'ok' ? `Saved “${name}”` : useStore.getState().libraryError ?? 'Could not save')
   }
 
   return (
@@ -99,9 +162,14 @@ export default function App() {
           <button className="btn primary" onClick={onShare}>
             Copy link
           </button>
+          <AccountButton onClick={() => setShowAccount((v) => !v)} />
           <ThemeToggle />
         </div>
       </header>
+
+      {showAccount && (
+        <AccountPanel onClose={() => setShowAccount(false)} onToast={setToast} />
+      )}
 
       {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
 
@@ -233,23 +301,20 @@ export default function App() {
           Lineup library
           <span className="hint">save each side's options, then sweep them against each other</span>
         </h2>
-        <LineupLibrary
-          lineups={lineups}
-          input={input}
-          onSave={(side) => {
-            const team = side === 'A' ? input.teamA : input.teamB
-            const name = window.prompt(`Name this ${team.name} setup`, describeLineup(team))?.trim()
-            if (name) {
-              saveLineup(side, name)
-              setToast(`Saved “${name}”`)
-            }
-          }}
-          onApply={(l) => {
-            applyLineup(l)
-            setToast(`Loaded “${l.name}”`)
-          }}
-          onRemove={removeLineup}
-        />
+        {signedIn ? (
+          <LineupLibrary
+            lineups={lineups}
+            input={input}
+            onSave={onSaveLineup}
+            onApply={(l) => {
+              applyLineup(l)
+              setToast(`Loaded “${l.name}”`)
+            }}
+            onRemove={removeLineup}
+          />
+        ) : (
+          <SignInPrompt what="a shelf of lineups" onSignIn={() => setShowAccount(true)} />
+        )}
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
@@ -257,15 +322,19 @@ export default function App() {
           Every lineup against every lineup
           <span className="hint">{input.teamA.name}'s win probability in each pairing</span>
         </h2>
-        <LineupMatrix
-          lineups={lineups}
-          input={input}
-          corrections={corrections}
-          onPick={(a, b) => {
-            applyPairing(a, b)
-            setToast(`Loaded ${a.name} v ${b.name}`)
-          }}
-        />
+        {signedIn ? (
+          <LineupMatrix
+            lineups={lineups}
+            input={input}
+            corrections={corrections}
+            onPick={(a, b) => {
+              applyPairing(a, b)
+              setToast(`Loaded ${a.name} v ${b.name}`)
+            }}
+          />
+        ) : (
+          <SignInPrompt what="lineups to sweep against each other" onSignIn={() => setShowAccount(true)} />
+        )}
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
@@ -273,13 +342,17 @@ export default function App() {
           Saved matchups
           <span className="hint">click a name to load · ± shows deltas on the key numbers</span>
         </h2>
-        <ScenarioTable
-          saved={saved}
-          compareWith={compareWith}
-          onLoad={(m) => replaceInput(m.input, m.corrections)}
-          onCompare={setCompareWith}
-          onRemove={remove}
-        />
+        {signedIn ? (
+          <ScenarioTable
+            saved={saved}
+            compareWith={compareWith}
+            onLoad={(m) => replaceInput(m.input, m.corrections)}
+            onCompare={setCompareWith}
+            onRemove={remove}
+          />
+        ) : (
+          <SignInPrompt what="saved matchups" onSignIn={() => setShowAccount(true)} />
+        )}
       </div>
 
       <footer className="muted" style={{ fontSize: 12, marginTop: 28, textAlign: 'center' }}>

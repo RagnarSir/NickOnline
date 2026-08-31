@@ -78,6 +78,7 @@ function Shelf({
               <span className="load" onClick={() => onApply(l)} title={`Load into ${teamName}`}>
                 {l.name}
               </span>
+              <span className="byline" title={`Saved by ${l.savedBy}`}>{l.savedBy}</span>
               <button title="Delete" onClick={() => onRemove(l.id)}>
                 ×
               </button>

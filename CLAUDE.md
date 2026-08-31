@@ -9,8 +9,10 @@ output, every time.
 
 ## What it is
 
-- **Static single-page app.** React 18 + Vite + strict TypeScript + Zustand. No backend, no
-  database, no API. Everything runs in the browser.
+- **Single-page app plus a small accounts API.** React 18 + Vite + strict TypeScript +
+  Zustand in the browser; Flask + SQLite behind gunicorn on the server. The *calculator*
+  is still entirely client-side and needs no account — the API exists only so a group of
+  people can share a library of saved matchups and lineups.
 - **Exact parity with v5.1 by default.** The engine reproduces the workbook cell for cell;
   `tests/engine.golden.test.ts` asserts ~150 intermediates plus the headline numbers against
   the workbook's own cached values, to 1e-12.
@@ -46,8 +48,21 @@ src/components/
   Corrections/, ThemeToggle/, Help/
   Lineups/                 per-side lineup library + the A x B win-probability matrix
   Scenarios/ScenarioTable  every saved matchup on one sortable screen
-src/store/matchStore.ts    Zustand state; localStorage for matchups and lineups
+src/store/matchStore.ts    Zustand state; the library half calls the API
+src/store/authStore.ts     who is signed in, and which group they act in
+src/api/client.ts          the only fetch wrapper; owns the 401 handler
+src/migrate/localLibrary   reads the pre-accounts localStorage keys, for a one-time import
 src/share.ts               match state <-> URL hash
+server/                    the accounts API (Flask + SQLite), see "Accounts" below
+  schema.sql               groups, users, matchups, lineups, login_events, rate_limit
+  db.py                    connections, schema, the persisted session secret
+  auth.py                  sessions, identity, login_required/admin_required
+  library.py               THE ONLY module that touches group-owned rows
+  validate.py              payload shape checks
+  ratelimit.py             SQLite-backed throttling (multi-worker safe)
+  app.py                   routes
+  cli.py                   initdb / promote / users, over ssh
+  tests/                   pytest; test_isolation.py is the important one
 deploy.py                  idempotent deploy to the OVH box
 ```
 
@@ -56,7 +71,10 @@ deploy.py                  idempotent deploy to the OVH box
 ```bash
 npm install
 npm run dev          # http://localhost:5173/NickOnline/
+npm run dev:api      # the accounts API on :8008 (second terminal; vite proxies to it)
 npm test             # the parity suite — run this after ANY engine change
+npm run test:py      # the API suite — run this after ANY server change
+npm run test:all     # both, in the order deploy.py runs them
 npm run build        # tsc && vite build
 npm run tables       # regenerate src/data/*.json from the workbook
 npm run howto        # regenerate HOWTO.md from src/help/guide.json
@@ -82,6 +100,72 @@ rule; the tooling only reminds you of it:
 
 The hook is advisory by design: only a human or the model can tell whether a given change
 is user-visible. It loads for sessions started inside this project directory.
+
+## Accounts, groups and isolation
+
+Several people use this, and some of them play each other. The whole feature exists so
+that **no group can see another group's saved work** — everything else is plumbing.
+
+- **The calculator stays public.** Anonymous visitors get the pitch, the results and
+  `#m=` share links, with no API call but `/auth/me`. Only *saving* needs an account.
+- **Sign-up is open**; a new account gets its own `personal` group and can see nothing
+  else. Membership of a *shared* group comes from a **join code** an admin hands over
+  out of band — not from an admin picking a username off a list, which with open sign-up
+  cannot tell `ragnar77` from `ragnar_77`.
+- **Rows never move between groups.** `matchups.group_id` is set at write time and is
+  immutable; joining a group changes `users.group_id` only. That is what makes "nothing
+  is published by surprise" structural instead of a promise. The Account panel *offers*
+  to copy a personal library across, and copies rather than moves, so leaving later is
+  not a dead end.
+
+### The rule that must not be broken
+
+**A group id comes from the session and nowhere else.** The cookie carries only
+`{uid, pwv}`; `auth.load_identity()` re-reads the user row on every request and derives
+`g.gid` from it. Re-reading (one indexed lookup on local WAL SQLite) is what makes an
+admin's change take effect on the user's *next request* rather than their next login — a
+session pinned to a stale group id would keep writing into the old group, which is
+exactly the leak this feature exists to prevent.
+
+`server/library.py` is the only module that touches `matchups` or `lineups`, and `gid` is
+every function's first parameter. Three tests defend this and all of them fail the deploy:
+
+- `test_isolation.py` walks `app.url_map` and **fails if any data route is missing from
+  its coverage table** — so a new endpoint cannot be added without testing its scoping.
+- It also pins that `group_id` / `groupId` / `gid` in the body, query string or headers is
+  ignored on every endpoint.
+- `test_source_guard.py` greps the source for a group id read from a request, and asserts
+  every `library.py` function takes `gid` first.
+
+A row that is not yours returns **404, never 403** — a 403 confirms the row exists, which
+is an existence oracle over another group's matchup names.
+
+### Things that are deliberate, not oversights
+
+- **Any group member can delete any row.** That follows from "the library is shared". The
+  `savedBy` byline makes authorship visible without making it a permission.
+- **Saving over a name asks first** (409 + explicit `overwrite`). A silent replace was
+  harmless on a private shelf and destroys a colleague's work on a shared one.
+- **`#m=` share links bypass groups entirely.** They are capability URLs: anyone holding
+  one sees that matchup. This is stated in `guide.json`; do not let it drift.
+- **No first-run `/setup` page.** RagCheat can have one because its sign-up is closed;
+  here it would be a land grab. Promotion is `cli promote <username>` over ssh, and
+  `deploy.py` prints the command when no admin exists.
+
+### The accepted risk
+
+The OVH vhost is **shared with other apps, so it is a shared origin.** Namespacing the
+cookie (`nickonline_session`, `Path=/NickOnline/`) stops it colliding with theirs, but a
+cookie path is not a security boundary: an XSS in any other app on that hostname could
+issue a same-origin `fetch('/NickOnline/api/…')` and act as the signed-in user. `HttpOnly`,
+`SameSite=Lax` and the `X-NickOnline` header all fail to help. The only real fix is a
+separate hostname. Given the data is Hattrick lineups this is accepted — but it is
+accepted, not unnoticed, and it changes if the data ever gets more sensitive.
+
+Lifted from RagCheat (`/home/ragnar/Claude/CursorTest/ht_analyzer/app.py`): the persisted
+session secret, Werkzeug hashing, `session.clear()` before every populate, the
+`login_required` / `admin_required` shape, rightmost-XFF client IP, and the login audit
+log. Groups, persistence and rate limiting are new here — RagCheat has none of them.
 
 ## Design notes
 
@@ -237,18 +321,53 @@ editing, and so no home directory ends up in a public file. They run from the pr
 ## Deployment
 
 ```bash
-python3 deploy.py             # test, build, rsync dist/, patch nginx, verify, push
-python3 deploy.py --no-build  # ship the existing dist/ as-is
+python3 deploy.py             # test, build, rsync, venv, systemd, nginx, verify, push
+python3 deploy.py --no-build  # ship the existing dist/ as-is (still runs the tests)
+python3 deploy.py --no-test   # skip the suites — has to be typed on purpose
 python3 deploy.py --no-push   # skip the git commit and push
+python3 deploy.py --logs      # tail the API service log
 ```
 
 **Where it deploys lives in `deploy_local.py`, which is gitignored** — this repo is public
 and the addresses are not. Copy `deploy_local.example.py` and fill it in; `deploy.py` refuses
 to run without it. The live URL is in that file.
 
-Static only — **no port claimed, no systemd unit, no `.env` on the server**. nginx serves the
-project's `dist/` through an `alias` block appended to a shared catch-all vhost, spliced in
-before `NGINX_ANCHOR` (also in `deploy_local.py`) so it reuses that vhost's TLS cert.
+Two things ship. nginx serves `dist/` through an `alias` block, and proxies
+`/NickOnline/api/` to **gunicorn on `127.0.0.1:8008`** under the systemd unit
+`nickonline-api`. Both location blocks are spliced into a shared catch-all vhost before
+`NGINX_ANCHOR`, so they reuse that vhost's TLS cert. The port is a public constant in
+`deploy.py`, not in `deploy_local.py`, because `vite.config.ts` needs it too and cannot
+import a gitignored file.
 
-`deploy.py` refuses to deploy if the parity suite fails, and finishes by committing and
-pushing to GitHub — so what is published always matches what is live.
+On the box:
+
+```
+/home/ubuntu/nickonline/
+├── dist/     rsync --delete target   (frontend)
+├── server/   rsync --delete target   (API; venv/ and tests/ excluded)
+└── data/     NEVER an rsync target · chmod 700
+    ├── nickonline.sqlite3(-wal/-shm)
+    └── secret_key                     (0600)
+```
+
+`data/` is a **sibling** of both rsync targets, so `--delete` is structurally incapable of
+reaching it — no `--filter 'protect'` rule to remember or accidentally drop. The deploy
+makes only `dist/` world-readable; a recursive `chmod o+rX` over the project dir would
+publish the database and every password hash to the other apps on the box.
+
+`deploy.py` refuses to deploy if either suite fails, and after deploying it asserts that
+`/api/health` is 200 **and that `/api/library` is 401** — an unauthenticated 200 there
+would mean the login gate is not in the request path at all, so that one **fails the
+deploy** rather than warning. It finishes by committing and pushing to GitHub, so what is
+published always matches what is live.
+
+First deploy only: sign up in the app, then promote yourself.
+
+```bash
+ssh <user>@<host> "cd /home/ubuntu/nickonline/server && \
+  NICKONLINE_DATA_DIR=/home/ubuntu/nickonline/data \
+  venv/bin/python -m cli promote <username>"
+```
+
+Needs passwordless sudo on the box for `nginx -t`, `systemctl reload nginx` and
+`systemctl restart nickonline-api`.

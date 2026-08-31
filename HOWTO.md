@@ -13,6 +13,7 @@ NickOnline works out what a Hattrick match is likely to do. You enter both teams
 - [Set pieces, tactic and specialties](#set-pieces-tactic-and-specialties)
 - [Reading the result](#reading-the-result)
 - [Comparing lineups](#comparing-lineups)
+- [Accounts and groups](#accounts-and-groups)
 - [Saving and sharing](#saving-and-sharing)
 - [Model corrections](#model-corrections)
 - [When the numbers look wrong](#when-the-numbers-look-wrong)
@@ -24,7 +25,7 @@ NickOnline works out what a Hattrick match is likely to do. You enter both teams
 3. Type your own ratings into the pitch, then set each side's tactic and specialties below it.
 4. Read the result. The scoreboard follows you as you scroll, so you can change a tactic and watch the odds move.
 
-> Nothing you enter leaves your browser, and nothing is saved until you press **Save**.
+> Everything you type into the calculator stays in your browser — no account is needed to work out a match. **Save** is the exception: saved matchups go to the server, where the people in your group can see them.
 
 ## Importing from Hattrick
 
@@ -62,6 +63,8 @@ Under each box is the rating in Hattrick's own words, so `12.5` reads as `magnif
 
 Midfield sits between the two halves. In **Match ratings** mode the possession split is computed from the two midfield ratings — it is cubic, so a small edge compounds into a large share. In **Sector percentages** mode you set possession yourself with the slider.
 
+Because each duel card stacks one team's attack over the other team's defence, plain top-to-bottom tabbing would alternate sides. It doesn't: **Tab** runs along a whole row before dropping to the next, so you fill in one team's three attack sectors with three presses, then the other team's three defences. **Shift+Tab** walks back the same way.
+
 > In Sector percentages mode the attack and defence ratings are still used — for the HTS score and the counter-attack model. They are behind **Attack & defence ratings** in each team's panel.
 
 ## Set pieces, tactic and specialties
@@ -97,13 +100,33 @@ Cells are your win probability. Blue means you are favoured, orange means they a
 
 **Saved matchups** is the other half: whole matchups rather than one side's setup, listed together and sortable by any column. Use it for one-off what-ifs. The `±` button pins one as a baseline, and the Key numbers tiles then show deltas against it.
 
+## Accounts and groups
+
+The calculator is open to everyone. An account only matters when you want to **keep** things: saved matchups, the lineup library and the matrix all live behind sign-in.
+
+Every account starts on its own. What you save is yours alone, and nobody else — signed in or not — can see it or know it exists.
+
+A **group** is how team-mates share one library. Everyone in a group sees the same saved matchups and lineups, and everyone can edit and delete them. Each row shows who saved it last, so you can tell your work from theirs. Nothing ever crosses between groups.
+
+1. Whoever runs this instance creates the group and gets a **join code** for it.
+2. They pass that code to the people who belong in the group — directly, the way you would a password.
+3. You sign in, open **Account**, and enter the code. From then on you are working in the group's shared library.
+
+> The code is what proves you were meant to be let in, so treat it like a password. An admin can issue a new one or revoke it at any time, which immediately stops anyone else using the old one.
+
+Joining a group does **not** hand over what you already saved. Your own library stays private, and the Account panel offers to copy it across if you want to — the originals stay where they are either way, so you can leave the group later and find them untouched.
+
+Saving under a name that someone in your group already used asks before replacing it, and tells you whose work it is and when they saved it.
+
 ## Saving and sharing
 
-- **Copy link** puts the entire matchup into the URL and copies it. Anyone who opens that link sees exactly what you see. Nothing is stored on a server — the whole matchup travels in the link.
-- **Save** keeps a matchup in this browser. **Save current setup** does the same for one side's lineup.
+- **Copy link** puts the entire matchup into the URL and copies it. Anyone who opens that link sees exactly what you see. Nothing is stored on a server — the whole matchup travels in the link, so a link works for people with no account at all.
+- **Save** keeps a matchup in your group's library on the server, so it follows you to any device you sign in on. **Save current setup** does the same for one side's lineup. Both need an account.
 - **Start over** clears everything back to a blank matchup.
 
-> Saved matchups and lineups live in this browser only. They do not follow you to another device, and clearing site data removes them. Use **Copy link** for anything you want to keep or send on.
+> A **Copy link** URL is a key, not a secret: anyone holding it can open that matchup, whether or not they are in your group. Groups protect what you *save*, not what you *send*.
+
+If you used NickOnline before it had accounts, your old saved work is still in this browser. Sign in and the **Account** panel offers to add it to your library — nothing is uploaded until you ask for it, and nothing is deleted from the browser afterwards.
 
 ## Model corrections
 

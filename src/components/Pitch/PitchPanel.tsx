@@ -1,3 +1,5 @@
+import type { KeyboardEvent } from 'react'
+
 import { ratingName } from '../../lib/ratingNames'
 import type { MatchInput, TeamInput } from '../../engine/types'
 
@@ -8,7 +10,34 @@ import type { MatchInput, TeamInput } from '../../engine/types'
  * — a left attack meets a right defence. Laying the inputs out as two attacking
  * halves, each sector sitting directly above the defender it faces, makes that
  * mechanic visible instead of leaving it buried in the formulas.
+ *
+ * That layout interleaves the two teams: every duel card holds one attacker's
+ * cell above one defender's. Left to itself, Tab would alternate sides, so
+ * entering one team's three sectors would take six presses. `data-tab` numbers
+ * each input with a team-grouped order and `onTabOrder` walks it instead —
+ * three attacks, then three defences, then the midfields. At either end of the
+ * pitch the custom order and the DOM agree, so Tab leaves the section normally.
  */
+
+/**
+ * Tab within the pitch follows `data-tab` rather than DOM order, so a run of
+ * presses stays on one team. Falls through to the browser at both ends.
+ */
+function onTabOrder(e: KeyboardEvent<HTMLElement>) {
+  if (e.key !== 'Tab' || e.altKey || e.ctrlKey || e.metaKey) return
+
+  const cells = [...e.currentTarget.querySelectorAll<HTMLInputElement>('input[data-tab]')].sort(
+    (x, y) => Number(x.dataset.tab) - Number(y.dataset.tab),
+  )
+  const here = cells.indexOf(document.activeElement as HTMLInputElement)
+  if (here < 0) return
+  const next = cells[here + (e.shiftKey ? -1 : 1)]
+  if (!next) return
+
+  e.preventDefault()
+  next.focus()
+  next.select()
+}
 
 const SECTORS = ['Left', 'Centre', 'Right'] as const
 /** Attack sector i is met by defence sector 2 - i. */
@@ -31,7 +60,7 @@ export function PitchPanel({ input, onChangeA, onChangeB }: Props) {
   const percent = ratingsMode === 'Percent'
 
   return (
-    <section className="pitch">
+    <section className="pitch" onKeyDown={onTabOrder}>
       <Half
         attacker={a}
         defender={b}
@@ -40,6 +69,7 @@ export function PitchPanel({ input, onChangeA, onChangeB }: Props) {
         percent={percent}
         onAttack={(i, v) => onChangeA((t) => void (percent ? (t.percentConv[i] = v) : (t.att[i] = v)))}
         onDefend={(i, v) => onChangeB((t) => void (t.def[i] = v))}
+        tabBase={0}
       />
 
       <Midfield input={input} onChangeA={onChangeA} onChangeB={onChangeB} />
@@ -52,6 +82,7 @@ export function PitchPanel({ input, onChangeA, onChangeB }: Props) {
         percent={percent}
         onAttack={(i, v) => onChangeB((t) => void (percent ? (t.percentConv[i] = v) : (t.att[i] = v)))}
         onDefend={(i, v) => onChangeA((t) => void (t.def[i] = v))}
+        tabBase={200}
       />
     </section>
   )
@@ -65,6 +96,7 @@ function Half({
   percent,
   onAttack,
   onDefend,
+  tabBase,
 }: {
   attacker: TeamInput
   defender: TeamInput
@@ -73,6 +105,8 @@ function Half({
   percent: boolean
   onAttack: (i: number, v: number) => void
   onDefend: (i: number, v: number) => void
+  /** Start of this half's slice of the tab order; attacks first, then defences. */
+  tabBase: number
 }) {
   return (
     <div className="half" style={{ ['--atk' as string]: attackerAccent, ['--def' as string]: defenderAccent }}>
@@ -91,6 +125,7 @@ function Half({
               value={percent ? attacker.percentConv[i] : attacker.att[i]}
               accent="var(--atk)"
               percent={percent}
+              tab={tabBase + i}
               onChange={(v) => onAttack(i, v)}
             />
 
@@ -103,6 +138,7 @@ function Half({
                   value={defender.def[FACES[i]]}
                   accent="var(--def)"
                   label={`${defender.name} ${SECTORS[FACES[i]].toLowerCase()} defence`}
+                  tab={tabBase + 10 + i}
                   onChange={(v) => onDefend(FACES[i], v)}
                 />
               </>
@@ -119,12 +155,14 @@ function Cell({
   accent,
   label,
   percent,
+  tab,
   onChange,
 }: {
   value: number
   accent: string
   label?: string
   percent?: boolean
+  tab: number
   onChange: (v: number) => void
 }) {
   const named = percent ? null : ratingName(value)
@@ -136,6 +174,7 @@ function Cell({
         step={percent ? 0.01 : 0.25}
         min={0}
         aria-label={label}
+        data-tab={tab}
         onChange={(e) => onChange(e.target.value === '' ? 0 : Number(e.target.value))}
       />
       {percent ? (
@@ -178,6 +217,7 @@ function Midfield({
           step={0.25}
           min={0}
           value={a.mid}
+          data-tab={100}
           onChange={(e) => onChangeA((t) => void (t.mid = Number(e.target.value) || 0))}
         />
         <span className="mf-name">{ratingName(a.mid)?.full ?? '—'}</span>
@@ -204,6 +244,7 @@ function Midfield({
             step={0.01}
             value={a.possession}
             aria-label="Possession share"
+            data-tab={101}
             onChange={(e) => onChangeA((t) => void (t.possession = Number(e.target.value)))}
           />
         )}
@@ -216,6 +257,7 @@ function Midfield({
           step={0.25}
           min={0}
           value={b.mid}
+          data-tab={102}
           onChange={(e) => onChangeB((t) => void (t.mid = Number(e.target.value) || 0))}
         />
         <span className="mf-name">{ratingName(b.mid)?.full ?? '—'}</span>

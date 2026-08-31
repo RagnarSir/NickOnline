@@ -2,10 +2,12 @@ import { useMemo, useState } from 'react'
 import { simulate } from '../../engine/simulate'
 import type { SavedMatchup } from '../../store/matchStore'
 
-type Key = 'name' | 'winA' | 'draw' | 'winB' | 'xgA' | 'xgB' | 'htsA' | 'htsB'
+type Key = 'name' | 'savedBy' | 'winA' | 'draw' | 'winB' | 'xgA' | 'xgB' | 'htsA' | 'htsB'
 
 const COLUMNS: { key: Key; label: string; numeric: boolean }[] = [
   { key: 'name', label: 'Matchup', numeric: false },
+  // On a shared shelf a row may be a colleague's, so say whose it is.
+  { key: 'savedBy', label: 'Saved by', numeric: false },
   { key: 'winA', label: 'Win', numeric: true },
   { key: 'draw', label: 'Draw', numeric: true },
   { key: 'winB', label: 'Loss', numeric: true },
@@ -42,6 +44,7 @@ export function ScenarioTable({
       return {
         m,
         name: m.name,
+        savedBy: m.savedBy,
         winA: r.regulation.winA,
         draw: r.regulation.draw,
         winB: r.regulation.winB,
@@ -93,12 +96,13 @@ export function ScenarioTable({
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.name}>
+            <tr key={row.m.id}>
               <td>
                 <span className="load" onClick={() => onLoad(row.m)} title="Load this matchup">
                   {row.name}
                 </span>
               </td>
+              <td className="byline">{row.savedBy}</td>
               <td>{pct(row.winA)}</td>
               <td>{pct(row.draw)}</td>
               <td>{pct(row.winB)}</td>
